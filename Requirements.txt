@@ -1,0 +1,14 @@
+# pip install fastapi uvicorn transformers peft datasets bitsandbytes accelerate
+# python -m uvicorn Src.App.app:app --reload --port 8000
+fastapi
+uvicorn
+pydantic
+requests
+huggingface_hub
+python-dotenv
+transformers
+peft
+datasets
+bitsandbytes
+accelerate
+torch

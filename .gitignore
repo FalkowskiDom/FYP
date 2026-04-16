@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+.venv312/
+
+# Environment variables
+.env
+
+# Models
+Models/
+Outputs/
+
+# Large files
+*.safetensors
+*.bin
+*.pt
+
+# Logs / temp
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+Data/
+logs.db
