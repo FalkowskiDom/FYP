@@ -155,10 +155,11 @@ app = FastAPI(
 #     mode="logbert", 
 #     hf_model_id=settings.logbert_model_id
 # )
-validator = Validator(
-    mode="logbert",
-    repo_path="Models/logbert"
-)
+# validator = Validator(
+#     mode="logbert",
+#     repo_path="Models/logbert"
+# )
+validator = Validator(mode="regex")
 
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -202,8 +203,6 @@ def ingest(req: IngestRequest):
 def events(event_id: int, limit: int = 200, run_validation: bool = True):
     """Get logs by event ID"""
     logs = get_by_event_id(event_id, limit=limit)
-    if run_validation:
-        logs = validator.score(logs)
     return {"event_id": event_id, "count": len(logs), "logs": logs}
 
 
@@ -218,7 +217,7 @@ def query(req: QueryRequest):
     if m:
         event_id = int(m.group(1))
         logs = get_by_event_id(event_id, limit=req.limit)
-        vlogs = validator.score(logs) if req.run_validation else logs
+        vlogs = logs
 
         prompt = (
             f"User question: {req.query}\n\n"

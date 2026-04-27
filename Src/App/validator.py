@@ -19,17 +19,31 @@ class BaseValidator:
         raise NotImplementedError
 
 
+SUSPICIOUS = re.compile(
+    r"(failed|failure|error|denied|malware|attack|unauthorized|invalid|blocked)",
+    re.IGNORECASE
+)
+
+
 class RegexValidator(BaseValidator):
     def score(self, logs: list[dict]) -> list[dict]:
         out = []
 
         for r in logs:
-            msg = r.get("message") or ""
-            score = 0.9 if SUSPICIOUS.search(msg) else 0.1
+            msg = f"{r.get('message') or ''} {r.get('raw') or ''}"
+            score = 0.85 if SUSPICIOUS.search(msg) else 0.15
 
             r2 = dict(r)
             r2["anomaly_score"] = score
-            r2["anomaly_label"] = "anomaly" if score >= 0.8 else "normal"
+
+            if score >= 0.9:
+                label = "anomaly"
+            elif score >= 0.75:
+                label = "suspicious"
+            else:
+                label = "normal"
+
+            r2["anomaly_label"] = label
             out.append(r2)
 
         return out
@@ -43,7 +57,7 @@ class LogBERTValidator(BaseValidator):
         repo_path: str = None, 
         hf_model_id: str = None,  # HF Inference API model
         window_size: int = 20,
-        threshold: float = 0.65,
+        threshold: float = 0.95,
         group_by: str = "host",
         fallback_to_regex: bool = True,
     ):
@@ -236,7 +250,12 @@ class LogBERTValidator(BaseValidator):
 
             r2 = dict(row)
             r2["anomaly_score"] = round(score, 4)
-            r2["anomaly_label"] = "anomaly" if score >= self.threshold else "normal"
+            if score >= 0.95:
+                r2["anomaly_label"] = "anomaly"
+            elif score >= 0.80:
+                r2["anomaly_label"] = "suspicious"
+            else:
+                r2["anomaly_label"] = "normal"
             out.append(r2)
 
         return out
