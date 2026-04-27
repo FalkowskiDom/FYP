@@ -10,16 +10,15 @@ from pathlib import Path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, project_root)
 
-try:
-    import patch_safetensors
-except ImportError:
-    print("Warning: Could not apply safetensors patch")
-
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.processors import TemplateProcessing
 from datasets import Dataset
 from transformers import (
     BertConfig,
     BertForMaskedLM,
-    BertTokenizerFast,
+    PreTrainedTokenizerFast,
     DataCollatorForLanguageModeling,
     Trainer,
     TrainingArguments,
@@ -31,18 +30,19 @@ TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+|[^\s]")
 
 
 def normalise_log_line(line: str, keep_values: bool = False) -> str:
-    """Convert one raw HDFS log line into a clean token sequence for MLM training."""
     line = line.strip()
     if not line:
         return ""
 
     if not keep_values:
-        line = re.sub(r"blk_-?\d+", " BLOCKID ", line)
-        line = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", " IPADDR ", line)
-        line = re.sub(r"0x[0-9A-Fa-f]+", " HEX ", line)
-        line = re.sub(r"\b\d+\b", " NUM ", line)
+        line = re.sub(r"blk_-?\d+", "BLOCKID", line)
+        line = re.sub(r"\b\d+\.\d+\.\d+\.\d+\b", "IPADDR", line)
+        line = re.sub(r"0x[0-9A-Fa-f]+", "HEX", line)
+        line = re.sub(r"\b\d+\b", "NUM", line)
 
-    return " ".join(TOKEN_RE.findall(line))
+    tokens = line.replace(":", " ").replace(",", " ").replace("=", " ").split()
+    return " ".join(tokens)
+    
 
 
 def calculate_default_read_limit(args: argparse.Namespace) -> int | None:
@@ -125,6 +125,31 @@ def save_tokenizer_files(vocab_tokens: list[str], output_dir: Path) -> Path:
 
     return vocab_path
 
+def build_log_tokenizer(vocab_tokens: list[str]) -> PreTrainedTokenizerFast:
+    vocab = {token: idx for idx, token in enumerate(vocab_tokens)}
+
+    tokenizer = Tokenizer(WordLevel(vocab=vocab, unk_token="[UNK]"))
+    tokenizer.pre_tokenizer = Whitespace()
+
+    tokenizer.post_processor = TemplateProcessing(
+        single="[CLS] $A [SEP]",
+        pair="[CLS] $A [SEP] $B:1 [SEP]:1",
+        special_tokens=[
+            ("[CLS]", vocab["[CLS]"]),
+            ("[SEP]", vocab["[SEP]"]),
+        ],
+    )
+
+    wrapped = PreTrainedTokenizerFast(
+        tokenizer_object=tokenizer,
+        unk_token="[UNK]",
+        pad_token="[PAD]",
+        cls_token="[CLS]",
+        sep_token="[SEP]",
+        mask_token="[MASK]",
+    )
+
+    return wrapped
 
 def build_token_list(
     texts: list[str],
@@ -154,7 +179,7 @@ def build_token_list(
     return vocab_tokens
 
 
-def tokenise_dataset(texts: list[str], tokenizer: BertTokenizerFast, max_length: int) -> Dataset:
+def tokenise_dataset(texts: list[str], tokenizer: PreTrainedTokenizerFast, max_length: int) -> Dataset:
     dataset = Dataset.from_dict({"text": texts})
 
     def tokenise_batch(batch):
@@ -226,6 +251,9 @@ def main() -> None:
 
     read_limit = calculate_default_read_limit(args)
     texts = load_hdfs_logs(log_path, keep_values=args.keep_values, max_lines=read_limit)
+    print("Sample processed logs:")
+    for sample in texts[:5]:
+        print(sample[:300])
 
     if not texts:
         raise ValueError(f"No valid log lines found in {log_path}")
@@ -243,17 +271,11 @@ def main() -> None:
         max_vocab_size=args.max_vocab_size,
         min_token_frequency=args.min_token_frequency,
     )
-    vocab_path = save_tokenizer_files(vocab_tokens, tokenizer_dir)
+    save_tokenizer_files(vocab_tokens, tokenizer_dir)
+    tokenizer = build_log_tokenizer(vocab_tokens)
 
-    tokenizer = BertTokenizerFast(
-        vocab_file=str(vocab_path),
-        unk_token="[UNK]",
-        sep_token="[SEP]",
-        pad_token="[PAD]",
-        cls_token="[CLS]",
-        mask_token="[MASK]",
-        do_lower_case=False,
-    )
+    print("First 30 vocab tokens:")
+    print(vocab_tokens[:30])
 
     train_dataset = tokenise_dataset(train_texts, tokenizer, args.max_length)
     val_dataset = tokenise_dataset(val_texts, tokenizer, args.max_length)
