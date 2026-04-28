@@ -12,3 +12,5 @@ datasets
 bitsandbytes
 accelerate
 torch
+pywin32
+streamlit

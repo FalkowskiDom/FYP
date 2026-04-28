@@ -9,43 +9,47 @@ _client = None
 
 def get_client():
     global _client
-    if _client is None and settings.hf_token and settings.hf_model_id:
+    if _client is None:
+        if not settings.hf_token:
+            return None
+
         _client = InferenceClient(
-            model=settings.hf_model_id,
-            token=settings.hf_token,
+            api_key=settings.hf_token,
         )
-        logger.info(f"Initialized HF Inference client for model: {settings.hf_model_id}")
     return _client
 
 
 def generate_text(prompt: str, max_new_tokens: int = 256) -> str:
-    if not settings.hf_token:
-        logger.error("HF_TOKEN not set")
-        return "[HF_TOKEN not configured]"
-    
-    if not settings.hf_model_id:
-        logger.error("HF_MODEL_ID not set")
-        return "[HF_MODEL_ID not configured]"
-
     client = get_client()
+
     if client is None:
-        return "[Failed to initialize HF Inference client]"
+        return "[HF_TOKEN not configured]"
 
     try:
-        response = client.text_generation(
-            prompt=prompt,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=0.0,
-            top_p=1.0,
-            repetition_penalty=1.15,
+        completion = client.chat.completions.create(
+            model=settings.hf_model_id,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a cybersecurity log analysis assistant. "
+                        "Explain Windows event logs clearly and briefly."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            max_tokens=max_new_tokens,
+            temperature=0.1,
         )
 
-        if isinstance(response, str):
-            return response.strip()
-
-        return str(response)
+        content = completion.choices[0].message.content
+        if content is None:
+            return "[No content generated]"
+        return content.strip()
 
     except Exception as e:
-        logger.error(f"HF Inference API error: {e}")
-        return f"[LLM API error: {str(e)}]"
+        logger.exception("HF Inference API error")
+        return f"[LLM API error: {repr(e)}]"

@@ -155,11 +155,10 @@ app = FastAPI(
 #     mode="logbert", 
 #     hf_model_id=settings.logbert_model_id
 # )
-# validator = Validator(
-#     mode="logbert",
-#     repo_path="Models/logbert"
-# )
-validator = Validator(mode="regex")
+validator = Validator(
+    mode="logbert",
+    repo_path="Models/logbert"
+)
 
 @app.middleware("http")
 async def log_requests(request, call_next):
