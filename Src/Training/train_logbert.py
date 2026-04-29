@@ -30,7 +30,9 @@ TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|\d+|[^\s]")
 
 
 def normalise_log_line(line: str, keep_values: bool = False) -> str:
+    # Cleans a raw log line and replaces changing values with placeholders.
     line = line.strip()
+
     if not line:
         return ""
 
@@ -46,7 +48,7 @@ def normalise_log_line(line: str, keep_values: bool = False) -> str:
 
 
 def calculate_default_read_limit(args: argparse.Namespace) -> int | None:
-    """Read enough lines to satisfy the train/validation caps without loading huge logs by default."""
+    # Calculates how many log lines need to be read for training and validation.
     if args.max_lines and args.max_lines > 0:
         return args.max_lines
 
@@ -66,6 +68,7 @@ def calculate_default_read_limit(args: argparse.Namespace) -> int | None:
 
 
 def load_hdfs_logs(log_path: Path, keep_values: bool, max_lines: int | None) -> list[str]:
+    # Loads and normalises HDFS log lines from the input file.
     if not log_path.exists():
         raise FileNotFoundError(f"Could not find HDFS log file: {log_path}")
 
@@ -74,6 +77,7 @@ def load_hdfs_logs(log_path: Path, keep_values: bool, max_lines: int | None) -> 
     with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             text = normalise_log_line(line, keep_values=keep_values)
+
             if text:
                 texts.append(text)
 
@@ -90,6 +94,7 @@ def split_train_val(
     max_train_samples: int,
     max_val_samples: int,
 ) -> tuple[list[str], list[str]]:
+    # Splits the logs into training and validation datasets.
     if len(texts) < 2:
         raise ValueError("Not enough log lines to create training and validation datasets")
 
@@ -109,6 +114,7 @@ def split_train_val(
 
     if not train_texts:
         raise ValueError("Training split is empty")
+
     if not val_texts:
         raise ValueError("Validation split is empty")
 
@@ -116,6 +122,7 @@ def split_train_val(
 
 
 def save_tokenizer_files(vocab_tokens: list[str], output_dir: Path) -> Path:
+    # Saves the tokenizer vocabulary to a vocab.txt file.
     output_dir.mkdir(parents=True, exist_ok=True)
     vocab_path = output_dir / "vocab.txt"
 
@@ -125,7 +132,9 @@ def save_tokenizer_files(vocab_tokens: list[str], output_dir: Path) -> Path:
 
     return vocab_path
 
+
 def build_log_tokenizer(vocab_tokens: list[str]) -> PreTrainedTokenizerFast:
+    # Builds a custom tokenizer for the log data.
     vocab = {token: idx for idx, token in enumerate(vocab_tokens)}
 
     tokenizer = Tokenizer(WordLevel(vocab=vocab, unk_token="[UNK]"))
@@ -151,11 +160,13 @@ def build_log_tokenizer(vocab_tokens: list[str]) -> PreTrainedTokenizerFast:
 
     return wrapped
 
+
 def build_token_list(
     texts: list[str],
     max_vocab_size: int,
     min_token_frequency: int,
 ) -> list[str]:
+    # Builds the vocabulary list from the log dataset.
     counter = Counter()
 
     for text in texts:
@@ -180,9 +191,11 @@ def build_token_list(
 
 
 def tokenise_dataset(texts: list[str], tokenizer: PreTrainedTokenizerFast, max_length: int) -> Dataset:
+    # Tokenises the log text so it can be used by the BERT model.
     dataset = Dataset.from_dict({"text": texts})
 
     def tokenise_batch(batch):
+        # Tokenises a batch of log lines.
         return tokenizer(
             batch["text"],
             truncation=True,
@@ -195,6 +208,7 @@ def tokenise_dataset(texts: list[str], tokenizer: PreTrainedTokenizerFast, max_l
 
 
 def build_training_args(args: argparse.Namespace, output_dir: Path) -> TrainingArguments:
+    # Creates the training settings for the LogBERT model.
     common_args = dict(
         output_dir=str(output_dir),
         num_train_epochs=args.num_train_epochs,
@@ -216,6 +230,7 @@ def build_training_args(args: argparse.Namespace, output_dir: Path) -> TrainingA
 
 
 def main() -> None:
+    # Runs the full LogBERT training process.
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--log_path", type=str, default=str(Path("Data") / "HDFS" / "HDFS.log"))
@@ -242,6 +257,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Checks that the validation split is valid.
     if not 0 < args.validation_split < 1:
         raise ValueError("--validation_split must be between 0 and 1")
 
@@ -249,8 +265,10 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     tokenizer_dir = output_dir / "tokenizer"
 
+    # Loads and prepares the log data.
     read_limit = calculate_default_read_limit(args)
     texts = load_hdfs_logs(log_path, keep_values=args.keep_values, max_lines=read_limit)
+
     print("Sample processed logs:")
     for sample in texts[:5]:
         print(sample[:300])
@@ -258,6 +276,7 @@ def main() -> None:
     if not texts:
         raise ValueError(f"No valid log lines found in {log_path}")
 
+    # Creates the training and validation splits.
     train_texts, val_texts = split_train_val(
         texts=texts,
         validation_split=args.validation_split,
@@ -266,20 +285,24 @@ def main() -> None:
         max_val_samples=args.max_val_samples,
     )
 
+    # Builds and saves the tokenizer vocabulary.
     vocab_tokens = build_token_list(
         train_texts + val_texts,
         max_vocab_size=args.max_vocab_size,
         min_token_frequency=args.min_token_frequency,
     )
+
     save_tokenizer_files(vocab_tokens, tokenizer_dir)
     tokenizer = build_log_tokenizer(vocab_tokens)
 
     print("First 30 vocab tokens:")
     print(vocab_tokens[:30])
 
+    # Tokenises the training and validation datasets.
     train_dataset = tokenise_dataset(train_texts, tokenizer, args.max_length)
     val_dataset = tokenise_dataset(val_texts, tokenizer, args.max_length)
 
+    # Creates a small BERT configuration for LogBERT training.
     config = BertConfig(
         vocab_size=tokenizer.vocab_size,
         hidden_size=args.hidden_size,
@@ -293,16 +316,20 @@ def main() -> None:
         attention_probs_dropout_prob=0.1,
     )
 
+    # Creates the masked language model.
     model = BertForMaskedLM(config)
 
+    # Randomly masks tokens during training.
     data_collator = DataCollatorForLanguageModeling(
         tokenizer=tokenizer,
         mlm=True,
         mlm_probability=args.mlm_probability,
     )
 
+    # Builds the training arguments.
     training_args = build_training_args(args, output_dir)
 
+    # Creates the Hugging Face trainer.
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -316,8 +343,10 @@ def main() -> None:
     print(f"Validation samples: {len(val_texts)}")
     print(f"Vocabulary size: {tokenizer.vocab_size}")
 
+    # Starts training the LogBERT model.
     trainer.train()
 
+    # Saves the trained model and tokenizer.
     model_dir = output_dir / "model"
     model_dir.mkdir(parents=True, exist_ok=True)
 
@@ -328,4 +357,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Runs the script.
     main()

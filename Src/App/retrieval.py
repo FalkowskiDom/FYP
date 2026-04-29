@@ -2,9 +2,12 @@ from .db import get_conn
 
 MAX_BATCH_SIZE = 1000
 
+
 def insert_logs(rows: list[dict]):
+    # Inserts a batch of parsed logs into the database.
     if len(rows) > MAX_BATCH_SIZE:
         raise ValueError(f"Batch size {len(rows)} exceeds maximum of {MAX_BATCH_SIZE}")
+
     with get_conn() as conn:
         conn.executemany(
             """
@@ -35,6 +38,7 @@ def insert_logs(rows: list[dict]):
 
 
 def get_by_event_id(event_id: int, limit: int = 200):
+    # Gets logs that match a specific event ID.
     with get_conn() as conn:
         cur = conn.execute(
             "SELECT * FROM logs WHERE event_id = ? ORDER BY id DESC LIMIT ?",
@@ -44,6 +48,7 @@ def get_by_event_id(event_id: int, limit: int = 200):
 
 
 def get_recent(limit: int = 200):
+    # Gets the most recent logs from the database.
     with get_conn() as conn:
         cur = conn.execute(
             "SELECT * FROM logs ORDER BY id DESC LIMIT ?",
@@ -53,6 +58,7 @@ def get_recent(limit: int = 200):
 
 
 def get_suspicious(threshold: float = 0.8, limit: int = 200):
+    # Gets logs with an anomaly score above the threshold.
     with get_conn() as conn:
         cur = conn.execute(
             """
@@ -67,6 +73,7 @@ def get_suspicious(threshold: float = 0.8, limit: int = 200):
 
 
 def get_by_user(user: str, limit: int = 200):
+    # Gets logs that match a specific username.
     with get_conn() as conn:
         cur = conn.execute(
             """
@@ -81,6 +88,7 @@ def get_by_user(user: str, limit: int = 200):
 
 
 def get_by_host(host: str, limit: int = 200):
+    # Gets logs that match a specific host name.
     with get_conn() as conn:
         cur = conn.execute(
             """

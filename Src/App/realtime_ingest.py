@@ -6,26 +6,31 @@ API = "http://127.0.0.1:8000/ingest"
 SERVER = "localhost"
 LOG_TYPE = "Security"
 
-# Windows-only import with fallback
+# Tries to import the Windows event log library.
 try:
     import win32evtlog
     HAS_WIN32 = True
 except ImportError:
     HAS_WIN32 = False
-    print("Warning: win32evtlog not available. Real-time ingestion only works on Windows.")
+    print("Warning: win32evtlog not available.")
 
+# Stops the script if Windows event logs are not available.
 if not HAS_WIN32:
-    print("Skipping real-time ingestion - Windows-only feature")
+    print("Skipping real-time ingestion ")
     exit(0)
 
+# Opens the Windows Security event log.
 hand = win32evtlog.OpenEventLog(SERVER, LOG_TYPE)
+
+# Reads the newest log entries first.
 flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
 
-# FIXED: Use deque with maxsize to prevent memory leak
+# Stores recent record numbers to avoid duplicate logs.
 seen = deque(maxlen=10000)
 
 
 def format_event(event):
+    # Converts a Windows event into a dictionary-like string.
     return str({
         "EventID": event.EventID & 0xFFFF,
         "TimeGenerated": str(event.TimeGenerated),
@@ -35,22 +40,26 @@ def format_event(event):
 
 
 while True:
+    # Reads Windows event logs.
     events = win32evtlog.ReadEventLog(hand, flags, 0)
     lines = []
 
+    # Formats new logs and skips duplicates.
     for event in events:
         key = event.RecordNumber
         
         if key in seen:
             continue
         
-        seen.append(key)  # FIXED: use append instead of add
+        seen.append(key)  
         line = format_event(event)
         lines.append(line)
 
+    # Sends new logs to the API.
     if lines:
-        # FIXED: Add retry logic with exponential backoff
         max_retries = 3
+
+        # Retries the request if it fails.
         for attempt in range(max_retries):
             try:
                 r = requests.post(API, json={"lines": lines}, timeout=30)
@@ -65,4 +74,5 @@ while True:
                     print(f"Attempt {attempt + 1} failed, retrying in {wait_time}s...")
                     time.sleep(wait_time)
 
+    # Waits before checking for new logs again.
     time.sleep(3)

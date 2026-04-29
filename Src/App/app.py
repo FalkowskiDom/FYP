@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 import re
@@ -21,7 +23,8 @@ from .retrieval import (
 from .validator import Validator
 from .hf_llm import generate_text
 
-# Setup logging
+
+# Sets up logging for the application.
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -29,10 +32,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# Defines the expected request body for log ingestion.
 class IngestRequest(BaseModel):
     lines: list[str]
 
 
+# Defines the expected request body for natural language queries.
 class QueryRequest(BaseModel):
     query: str
     limit: int = 200
@@ -40,17 +45,17 @@ class QueryRequest(BaseModel):
     max_new_tokens: int = 256
 
 
-# Real-time ingest state
+# Tracks whether real-time log ingestion is running.
 ingest_task_running = False
 
 
 def run_realtime_ingest():
-    """Background task for real-time Windows event log ingestion"""
+    """Reads Windows event logs in the background and sends them to the API."""
     import time
     import requests
     from collections import deque
-    
-    # Windows-only import with fallback
+
+    # Imports the Windows event log library if it is available.
     try:
         import win32evtlog
         HAS_WIN32 = True
@@ -59,6 +64,7 @@ def run_realtime_ingest():
         logger.warning("win32evtlog not available. Real-time ingestion only works on Windows.")
         return
 
+    # Stops ingestion if the app is not running on Windows.
     if not HAS_WIN32:
         logger.warning("Skipping real-time ingestion - Windows-only feature")
         return
@@ -66,29 +72,37 @@ def run_realtime_ingest():
     API = "http://127.0.0.1:8000/ingest"
     SERVER = "localhost"
     LOG_TYPE = "Security"
-    
+
     try:
+        # Opens the Windows Security event log.
         hand = win32evtlog.OpenEventLog(SERVER, LOG_TYPE)
+
+        # Reads the newest log entries first.
         flags = win32evtlog.EVENTLOG_BACKWARDS_READ | win32evtlog.EVENTLOG_SEQUENTIAL_READ
+
+        # Stores recent record numbers to avoid duplicate logs.
         seen = deque(maxlen=10000)
-        
+
         def format_event(event):
+            """Converts a Windows event into a dictionary-like string."""
             return str({
                 "EventID": event.EventID & 0xFFFF,
                 "TimeGenerated": str(event.TimeGenerated),
                 "SourceName": event.SourceName,
                 "Message": str(event.StringInserts)
             })
-        
+
         logger.info("Real-time ingestion started")
         global ingest_task_running
         ingest_task_running = True
-        
+
+        # Keeps reading logs while ingestion is running.
         while ingest_task_running:
             try:
                 events = win32evtlog.ReadEventLog(hand, flags, 0)
                 lines = []
-                
+
+                # Formats new events and skips duplicates.
                 for event in events:
                     key = event.RecordNumber
                     if key in seen:
@@ -96,7 +110,8 @@ def run_realtime_ingest():
                     seen.append(key)
                     line = format_event(event)
                     lines.append(line)
-                
+
+                # Sends new log lines to the ingest endpoint.
                 if lines:
                     max_retries = 3
                     for attempt in range(max_retries):
@@ -112,12 +127,13 @@ def run_realtime_ingest():
                                 wait_time = 2 ** attempt
                                 logger.warning(f"Ingest attempt {attempt + 1} failed, retrying in {wait_time}s...")
                                 time.sleep(wait_time)
-                
+
+                # Waits before checking for new logs again.
                 time.sleep(3)
             except Exception as e:
                 logger.error(f"Error in real-time ingest loop: {e}")
                 time.sleep(5)
-                
+
     except Exception as e:
         logger.error(f"Failed to start real-time ingestion: {e}")
         ingest_task_running = False
@@ -125,23 +141,26 @@ def run_realtime_ingest():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """App lifespan - startup and shutdown events"""
+    """Initialises the app on startup and stops ingestion on shutdown."""
     logger.info("Starting up AI Log Query Engine...")
+
+    # Creates or opens the database.
     init_db()
-    
-    # Start real-time ingestion in background
+
+    # Starts real-time log ingestion in a separate thread.
     import threading
     ingest_thread = threading.Thread(target=run_realtime_ingest, daemon=True)
     ingest_thread.start()
-    
+
     yield
-    
-    # Shutdown
+
+    # Stops the background ingestion loop.
     global ingest_task_running
     ingest_task_running = False
     logger.info("Shutting down...")
 
 
+# Creates the FastAPI application.
 app = FastAPI(
     title="AI Log Query Engine",
     lifespan=lifespan,
@@ -150,19 +169,16 @@ app = FastAPI(
 )
 
 
-# Use HF Inference API for LogBERT
-# validator = Validator(
-#     mode="logbert", 
-#     hf_model_id=settings.logbert_model_id
-# )
+# Creates the LogBERT validator used to score logs.
 validator = Validator(
     mode="logbert",
     repo_path="Models/logbert"
 )
 
+
 @app.middleware("http")
 async def log_requests(request, call_next):
-    """Log all HTTP requests with timing"""
+    """Logs each HTTP request and how long it takes."""
     start_time = time.time()
     response = await call_next(request)
     duration = time.time() - start_time
@@ -172,7 +188,7 @@ async def log_requests(request, call_next):
 
 @app.get("/health")
 def health_check():
-    """Health check endpoint"""
+    """Returns the current health status of the API."""
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -182,48 +198,52 @@ def health_check():
 
 @app.post("/ingest")
 def ingest(req: IngestRequest):
-    """Ingest log lines into the database"""
+    """Parses, scores, and stores incoming log lines."""
     rows = []
-    
+
+    # Parses each raw log line into a structured row.
     for line in req.lines:
         r = parse_line(line)
         if r:
             rows.append(r)
-    
+
+    # Scores valid logs and saves them to the database.
     if rows:
         rows = validator.score(rows)
         insert_logs(rows)
         logger.info(f"Ingested {len(rows)} log entries")
-    
+
     return {"ingested": len(rows), "processed": len(req.lines)}
 
 
 @app.get("/events/{event_id}")
 def events(event_id: int, limit: int = 200, run_validation: bool = True):
-    """Get logs by event ID"""
+    """Returns logs that match a specific event ID."""
     logs = get_by_event_id(event_id, limit=limit)
     return {"event_id": event_id, "count": len(logs), "logs": logs}
 
 
 @app.post("/query")
 def query(req: QueryRequest):
-    """Natural language query endpoint"""
+    """Handles natural language queries about the logs."""
     q = req.query
     q_lower = q.lower()
 
-    # Event ID search
+    # Checks if the user asked for a specific event ID.
     m = re.search(r"\b(?:event)\s*(\d+)\b", q_lower)
     if m:
         event_id = int(m.group(1))
         logs = get_by_event_id(event_id, limit=req.limit)
         vlogs = logs
 
+        # Builds a prompt for the language model.
         prompt = (
             f"User question: {req.query}\n\n"
             f"Logs:\n{json.dumps(vlogs[:30], indent=2)}\n\n"
             "Summarise and flag anything suspicious."
         )
 
+        # Generates a summary using the Hugging Face LLM.
         summary = generate_text(prompt, max_new_tokens=req.max_new_tokens)
 
         return {
@@ -234,9 +254,11 @@ def query(req: QueryRequest):
             "logs": vlogs,
         }
 
-    # Suspicious logs search
+    # Checks if the user asked for suspicious or anomalous logs.
     if "suspicious" in q_lower or "anomaly" in q_lower:
         logs = get_suspicious(limit=req.limit)
+
+        # Asks the language model to explain the suspicious logs.
         prompt = f"Summarise why these logs are suspicious:\n{json.dumps(logs[:30], indent=2)}"
         summary = generate_text(prompt, max_new_tokens=req.max_new_tokens)
 
@@ -247,7 +269,7 @@ def query(req: QueryRequest):
             "logs": logs,
         }
 
-    # User search
+    # Checks if the user asked for logs by username.
     m = re.search(r"user\s+([^\s]+)", q, re.IGNORECASE)
     if m:
         user = m.group(1)
@@ -260,7 +282,7 @@ def query(req: QueryRequest):
             "logs": logs,
         }
 
-    # Host search
+    # Checks if the user asked for logs by host name.
     m = re.search(r"host\s+([^\s]+)", q, re.IGNORECASE)
     if m:
         host = m.group(1)
@@ -273,8 +295,10 @@ def query(req: QueryRequest):
             "logs": logs,
         }
 
-    # General query
+    # Uses recent logs when no specific query type is found.
     logs = get_recent(limit=req.limit)
+
+    # Asks the language model to answer using recent logs.
     prompt = f"User question: {req.query}\n\nLogs:\n{json.dumps(logs[:30], indent=2)}"
     answer = generate_text(prompt, max_new_tokens=req.max_new_tokens)
 

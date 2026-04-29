@@ -22,6 +22,7 @@ PROMPT_TEMPLATE = "### Instruction:\n{instruction}\n\n### Response:\n"
 
 
 def parse_args() -> argparse.Namespace:
+    # Reads the command-line arguments for training.
     p = argparse.ArgumentParser()
 
     p.add_argument("--model_id", type=str, default="Qwen/Qwen2.5-3B-Instruct")
@@ -61,6 +62,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_path(path_str: str | None) -> Path | None:
+    # Converts a string path into a full file path.
     if not path_str:
         return None
 
@@ -69,10 +71,12 @@ def resolve_path(path_str: str | None) -> Path | None:
     if path.is_absolute():
         return path.resolve()
 
+    # Checks the current working directory first.
     cwd_candidate = (Path.cwd() / path).resolve()
     if cwd_candidate.exists():
         return cwd_candidate
 
+    # Checks the project directory if the file is not found.
     script_candidate = (Path(__file__).resolve().parents[2] / path).resolve()
     if script_candidate.exists():
         return script_candidate
@@ -81,6 +85,7 @@ def resolve_path(path_str: str | None) -> Path | None:
 
 
 def build_texts(batch: Dict[str, List[str]]) -> tuple[List[str], List[str]]:
+    # Builds prompts and full training texts from the dataset.
     prompts = [PROMPT_TEMPLATE.format(instruction=i) for i in batch["instruction"]]
     responses = [r if r is not None else "" for r in batch["response"]]
     full_texts = [p + resp for p, resp in zip(prompts, responses)]
@@ -95,10 +100,12 @@ def tokenize_raw_dataset(
     batch_size: int,
     mask_prompt_loss: bool,
 ) -> Dataset:
+    # Tokenises the raw dataset for model training.
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     def tok_fn(batch: Dict[str, List[str]]) -> Dict[str, Any]:
+        # Tokenises each batch of prompts and responses.
         prompts, full_texts = build_texts(batch)
 
         tok_full = tokenizer(
@@ -108,9 +115,12 @@ def tokenize_raw_dataset(
             padding=False,
             return_attention_mask=True,
         )
+
+        # Copies input IDs to use as labels.
         labels = [ids.copy() for ids in tok_full["input_ids"]]
 
         if mask_prompt_loss:
+            # Masks the prompt so the model only learns from the response.
             tok_prompt = tokenizer(
                 prompts,
                 truncation=True,
@@ -118,7 +128,9 @@ def tokenize_raw_dataset(
                 padding=False,
                 add_special_tokens=True,
             )
+
             prompt_lens = [len(x) for x in tok_prompt["input_ids"]]
+
             for i, pl in enumerate(prompt_lens):
                 pl = min(pl, len(labels[i]))
                 labels[i][:pl] = [-100] * pl
@@ -141,10 +153,12 @@ class CausalLMCollator:
     tokenizer: Any
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+        # Pads training samples into equal length tensors.
         pad_id = self.tokenizer.pad_token_id
         max_len = max(len(f["input_ids"]) for f in features)
 
         def pad_list(xs: List[int], pad_value: int) -> List[int]:
+            # Adds padding to a list until it reaches the maximum length.
             return xs + [pad_value] * (max_len - len(xs))
 
         input_ids = [pad_list(f["input_ids"], pad_id) for f in features]
@@ -159,22 +173,30 @@ class CausalLMCollator:
 
 
 def main() -> None:
+    # Runs the full Qwen fine-tuning process.
     args = parse_args()
     hf_token = os.environ.get(args.hf_token_env)
 
+    # Resolves input and output paths.
     data_jsonl_path = resolve_path(args.data_jsonl)
     tokenized_dir_path = resolve_path(args.tokenized_dir)
     output_dir_path = resolve_path(args.output_dir)
 
+    # Loads the tokenizer.
     tokenizer = AutoTokenizer.from_pretrained(args.model_id, use_fast=True, token=hf_token)
+
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Loads a pre-tokenised dataset if provided.
     if tokenized_dir_path is not None:
         if not tokenized_dir_path.exists():
             raise FileNotFoundError(f"Tokenized dataset folder not found: {tokenized_dir_path}")
+
         train_ds = load_from_disk(str(tokenized_dir_path))
+
     else:
+        # Loads and tokenises the JSONL dataset.
         if data_jsonl_path is None or not data_jsonl_path.exists():
             raise FileNotFoundError(
                 f"JSONL dataset not found: {data_jsonl_path}\n"
@@ -184,7 +206,10 @@ def main() -> None:
             )
 
         raw = load_dataset("json", data_files=str(data_jsonl_path), split="train")
+
+        # Limits the dataset size for training.
         raw = raw.select(range(20000))
+
         train_ds = tokenize_raw_dataset(
             raw,
             tokenizer=tokenizer,
@@ -194,12 +219,14 @@ def main() -> None:
             mask_prompt_loss=args.mask_prompt_loss,
         )
 
+    # Sets up 4-bit quantisation to reduce GPU memory usage.
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         llm_int8_enable_fp32_cpu_offload=True,
         bnb_4bit_compute_dtype=torch.float16,
     )
 
+    # Loads the base Qwen model.
     model = AutoModelForCausalLM.from_pretrained(
         args.model_id,
         quantization_config=bnb_config,
@@ -207,10 +234,14 @@ def main() -> None:
         token=hf_token,
     )
 
+    # Enables memory-saving training settings.
     model.gradient_checkpointing_enable()
     model.config.use_cache = False
 
+    # Defines which model layers LoRA will train.
     lora_targets = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+    # Sets up the LoRA configuration.
     lora_config = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
@@ -219,10 +250,14 @@ def main() -> None:
         task_type="CAUSAL_LM",
         target_modules=lora_targets,
     )
+
+    # Applies LoRA to the model.
     model = get_peft_model(model, lora_config)
 
+    # Creates the output folder.
     output_dir_path.mkdir(parents=True, exist_ok=True)
 
+    # Sets the training configuration.
     training_args = TrainingArguments(
         output_dir=str(output_dir_path),
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -240,23 +275,29 @@ def main() -> None:
         optim="paged_adamw_8bit",
         report_to="none",
         gradient_checkpointing=True,
-        dataloader_num_workers= 0 ,
-        
+        dataloader_num_workers=0,
     )
 
+    # Creates the Hugging Face trainer.
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
         data_collator=CausalLMCollator(tokenizer),
     )
+
+    # Starts training.
     trainer.train()
+
+    # Saves the trained adapter and tokenizer.
     trainer.save_model(str(output_dir_path))
     tokenizer.save_pretrained(str(output_dir_path))
 
+    # Uploads the model to Hugging Face if requested.
     if args.push_to_hub:
         if not args.hub_repo:
             raise ValueError("--hub_repo is required when --push_to_hub is set")
+
         model.push_to_hub(args.hub_repo, private=args.hub_private, token=hf_token)
         tokenizer.push_to_hub(args.hub_repo, private=args.hub_private, token=hf_token)
 
@@ -264,4 +305,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Runs the script.
     main()

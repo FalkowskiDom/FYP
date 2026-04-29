@@ -1,6 +1,3 @@
-# Quick Script to cut down the HDFS.log data to a manageable size for training
-
-
 import random
 from pathlib import Path
 
@@ -13,18 +10,21 @@ SEED = 42
 
 
 def main():
+    # Sets the random seed so the sample is repeatable.
     random.seed(SEED)
 
+    # Checks that the input log file exists.
     if not INPUT_FILE.exists():
         raise FileNotFoundError(f"File not found: {INPUT_FILE}")
 
+    # Creates the output folder if it does not exist.
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     print("Reading and sampling logs...")
 
     sampled_lines = []
 
-    # Reservoir sampling (efficient for large files)
+    # Samples lines from the large log file without loading everything at once.
     with open(INPUT_FILE, "r", encoding="utf-8", errors="ignore") as f:
         for i, line in enumerate(f):
             if i < TOTAL_LINES_TO_SAMPLE:
@@ -36,11 +36,13 @@ def main():
 
     print(f"Sampled {len(sampled_lines)} lines")
 
-
+    # Shuffles the sampled logs before splitting.
     random.shuffle(sampled_lines)
 
+    # Calculates where to split the training and test data.
     split_index = int(len(sampled_lines) * TRAIN_SPLIT)
 
+    # Splits the sampled logs into training and test sets.
     train_lines = sampled_lines[:split_index]
     test_lines = sampled_lines[split_index:]
 
@@ -49,10 +51,12 @@ def main():
 
     print("Saving files...")
 
+    # Saves the training log file.
     with open(train_file, "w", encoding="utf-8") as f:
         for line in train_lines:
             f.write(line + "\n")
 
+    # Saves the test log file.
     with open(test_file, "w", encoding="utf-8") as f:
         for line in test_lines:
             f.write(line + "\n")
@@ -61,5 +65,7 @@ def main():
     print(f"Test file: {test_file} ({len(test_lines)} lines)")
     print("Done.")
 
+
 if __name__ == "__main__":
+    # Runs the script.
     main()
